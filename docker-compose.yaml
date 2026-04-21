@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    container_name: reach_backend_api
+    ports:
+      - "8088:8088"
+    depends_on:
+      - db
+    env_file:
+      - .env
+    environment:
+      # We override the Mongo URI here to point to the docker container's service name "db"
+      - MONGODB_URI=mongodb://db:27017/
+      - MONGO_DB_NAME=reach
+    volumes:
+      # Optional: Mounts your local 'app' dir so changes show up immediately without rebuilding
+      - ./app:/workspace/app
+      # Mount the firebase credentials and .env so the container can see them
+      - ./firebase-credentials.json:/workspace/firebase-credentials.json
+      - ./.env:/workspace/.env
+
+  db:
+    image: mongo:4.4
+    container_name: reach_backend_db
+    ports:
+      - "27017:27017"
+    volumes:
+      # Persist data so you don't lose users/messages when the container stops
+      - mongo_data:/data/db
+
+volumes:
+  mongo_data:
