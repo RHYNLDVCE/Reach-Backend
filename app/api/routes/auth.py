@@ -10,11 +10,13 @@ router = APIRouter()
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register_user(user_data: UserCreate, api_key: str = Depends(verify_api_key)):
-    existing_user = await db_instance.users.find_one({"username": user_data.username}) #type: ignore
+    existing_user = await db_instance.users.find_one({"username": user_data.username}) # type: ignore
     if existing_user:
         raise HTTPException(status_code=400, detail="Username already registered")
 
-    user_id = str(uuid.uuid4())
+    # FIX: Use the frontend's UUID if they provided one, otherwise generate a new one
+    user_id = user_data.user_id if user_data.user_id else str(uuid.uuid4())
+    
     hashed_pwd = get_password_hash(user_data.password)
     
     initial_device = Device(
@@ -25,15 +27,15 @@ async def register_user(user_data: UserCreate, api_key: str = Depends(verify_api
     )
     
     new_user = UserInDB(
-        user_id=user_id,
+        user_id=user_id, # <-- Now using the preserved ID
         username=user_data.username,
         hashed_password=hashed_pwd,
         devices=[initial_device],
         public_key=user_data.public_key,
-        private_key=user_data.private_key  # Store the private key securely in the DB
+        private_key=user_data.private_key
     )
 
-    await db_instance.users.insert_one(new_user.model_dump()) #type: ignore
+    await db_instance.users.insert_one(new_user.model_dump()) # type: ignore
 
     return new_user
 

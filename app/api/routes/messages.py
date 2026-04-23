@@ -53,7 +53,7 @@ async def sync_mesh_messages(
     
 @router.websocket("/ws/{token}")
 async def websocket_endpoint(websocket: WebSocket, token: str):
-    # 1. We removed the X-API-KEY header check. 
+    # 1. I removed the X-API-KEY header check. 
     # The JWT token in the URL is already mathematically secure.
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
@@ -67,7 +67,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         
     await manager.connect(user_id, websocket) #type: ignore
     
-    # 2. Fetch the user's name once when they connect
+    # 2. I fetch the user's name once when they connect
     user_doc = await db_instance.users.find_one({"user_id": user_id}) # type: ignore
     current_username = user_doc.get("username", "Unknown") if user_doc else "Unknown"
     
@@ -82,9 +82,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 await manager.send_personal_message(data, original_sender)
                 continue
             
-            # --- 3. SECURITY & DEFAULT DATA INJECTION (THE FIX) ---
-            data["sender_id"] = user_id
-            data["sender_username"] = current_username
+            # --- 3. MESH ROUTING FIX ---
+            # I do NOT blindly overwrite the sender ID. In a mesh network, 
+            # the uploading node (user_id) is often not the original author!
+            claimed_sender = data.get("sender_id", user_id)
+            claimed_username = data.get("sender_username", current_username)
+            
+            data["sender_id"] = claimed_sender
+            data["sender_username"] = claimed_username
             
             if "is_delivered_to_target" not in data:
                 data["is_delivered_to_target"] = False
@@ -92,10 +97,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             if "timestamp" not in data:
                 data["timestamp"] = int(time.time() * 1000)
 
-            # --- 2. Save Message to Database ---
+            # --- Save Message to Database ---
             target_id = data.get("target_id")
             await db_instance.messages.update_one({"message_id": data.get("message_id")},{"$set": data},upsert=True) # type: ignore
 
+            # Send a confirmation echo back to the uploading node
             if user_id in manager.active_connections:
                 await manager.send_personal_message(data, user_id)
 
@@ -110,24 +116,27 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 if group:
                     # Broadcast to all members
                     for member_id in group.get("members", []):
-                        if member_id != user_id:
+                        # FIX: I skip the ORIGINAL AUTHOR, not the uploading node!
+                        if member_id != claimed_sender:
                             if member_id in manager.active_connections:
                                 await manager.send_personal_message(data, member_id)
                             else:
                                 await send_offline_notification(
                                     target_id=member_id, 
-                                    sender_username=current_username, 
+                                    sender_username=claimed_username, 
                                     thread_id=target_id, 
                                     encrypted_data=data.get("encrypted_payload", {}).get("data", "")
                                 )
                 else:
                     # 1-on-1 offline
-                    await send_offline_notification(
-                        target_id=target_id, 
-                        sender_username=current_username, 
-                        thread_id=user_id, 
-                        encrypted_data=data.get("encrypted_payload", {}).get("data", "")
-                    )
+                    # FIX: I prevent 1-on-1 self-notification loops
+                    if target_id != claimed_sender:
+                        await send_offline_notification(
+                            target_id=target_id, 
+                            sender_username=claimed_username, 
+                            thread_id=claimed_sender, 
+                            encrypted_data=data.get("encrypted_payload", {}).get("data", "")
+                        )
 
     # 4. Catch ALL exceptions so disconnect ALWAYS runs!
     except Exception as e:
