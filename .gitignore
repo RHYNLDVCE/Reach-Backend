@@ -1,3 +1,4 @@
 .env
 venv/
 firebase-credentials.json
+temp.txt

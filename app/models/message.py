@@ -40,3 +40,10 @@ class GroupResponse(BaseModel):
     members: List[str]     # List of user UUIDs in this GC
     created_by: str        # The UUID of the admin who made the GC
     created_at: float
+    
+class BackupMessageDto(BaseModel):
+    message_id: str
+    thread_id: str
+    sender_id: str
+    encrypted_data: str
+    timestamp: int

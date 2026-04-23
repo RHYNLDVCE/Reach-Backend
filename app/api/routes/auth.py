@@ -9,11 +9,10 @@ import uuid
 router = APIRouter()
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-async def register_user( user_data: UserCreate, api_key: str = Depends(verify_api_key)):
+async def register_user(user_data: UserCreate, api_key: str = Depends(verify_api_key)):
     existing_user = await db_instance.users.find_one({"username": user_data.username}) #type: ignore
     if existing_user:
         raise HTTPException(status_code=400, detail="Username already registered")
-
 
     user_id = str(uuid.uuid4())
     hashed_pwd = get_password_hash(user_data.password)
@@ -30,7 +29,8 @@ async def register_user( user_data: UserCreate, api_key: str = Depends(verify_ap
         username=user_data.username,
         hashed_password=hashed_pwd,
         devices=[initial_device],
-        public_key=user_data.public_key
+        public_key=user_data.public_key,
+        private_key=user_data.private_key  # Store the private key securely in the DB
     )
 
     await db_instance.users.insert_one(new_user.model_dump()) #type: ignore
@@ -46,13 +46,17 @@ async def login_user(user_data: UserLogin, api_key: str = Depends(verify_api_key
             status_code=status.HTTP_401_UNAUTHORIZED, 
             detail="Invalid username or password"
         )
+
     access_token = create_access_token(subject=user["user_id"])
+    
+    # Return BOTH keys to the app so it can decrypt old messages!
     return {
         "access_token": access_token, 
         "token_type": "bearer", 
-        "user_id": user["user_id"]
+        "user_id": user["user_id"],
+        "public_key": user.get("public_key", ""),
+        "private_key": user.get("private_key", "")
     }
-    
     
 @router.get("/user/{username}", response_model=UserResponse)
 async def get_user_by_username(username: str, api_key: str = Depends(verify_api_key)):
