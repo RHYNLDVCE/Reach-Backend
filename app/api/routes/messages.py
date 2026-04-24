@@ -27,7 +27,8 @@ async def send_offline_notification(target_id: str, sender_username: str, thread
                     "body": encrypted_data,
                     "thread_id": str(thread_id)
                 }, 
-                token=target_user["fcm_token"]
+                token=target_user["fcm_token"],
+                android=messaging.AndroidConfig(priority='high')
             )
             response = messaging.send(push_msg)
             print(f"Push sent to {target_id}! Response: {response}")
