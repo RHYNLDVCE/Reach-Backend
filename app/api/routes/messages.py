@@ -53,8 +53,6 @@ async def sync_mesh_messages(
     
 @router.websocket("/ws/{token}")
 async def websocket_endpoint(websocket: WebSocket, token: str):
-    # 1. I removed the X-API-KEY header check. 
-    # The JWT token in the URL is already mathematically secure.
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         user_id = payload.get("sub")
@@ -67,7 +65,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         
     await manager.connect(user_id, websocket) #type: ignore
     
-    # 2. I fetch the user's name once when they connect
     user_doc = await db_instance.users.find_one({"user_id": user_id}) # type: ignore
     current_username = user_doc.get("username", "Unknown") if user_doc else "Unknown"
     
@@ -82,9 +79,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 await manager.send_personal_message(data, original_sender)
                 continue
             
-            # --- 3. MESH ROUTING FIX ---
-            # I do NOT blindly overwrite the sender ID. In a mesh network, 
-            # the uploading node (user_id) is often not the original author!
             claimed_sender = data.get("sender_id", user_id)
             claimed_username = data.get("sender_username", current_username)
             
@@ -106,49 +100,45 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 await manager.send_personal_message(data, user_id)
 
             # --- 4. Route to Target (1-on-1 OR Group Chat) ---
-            if target_id in manager.active_connections:
-                # 1-on-1 message and user is online
-                await manager.send_personal_message(data, target_id)
+            # FIX: Check if the target is a group first!
+            group = await db_instance.groups.find_one({"group_id": target_id}) # type: ignore
+            
+            if group:
+                # It's a Group Chat! Fan-out to all members.
+                for member_id in group.get("members", []):
+                    if member_id != claimed_sender:
+                        if member_id in manager.active_connections:
+                            # User is online, send via WebSocket
+                            await manager.send_personal_message(data, member_id)
+                        else:
+                            # User is offline, send via Firebase Push
+                            await send_offline_notification(
+                                target_id=member_id, 
+                                sender_username=claimed_username, 
+                                thread_id=target_id, 
+                                encrypted_data=data.get("encrypted_payload", {}).get("data", "")
+                            )
             else:
-                # Group Chat Check
-                group = await db_instance.groups.find_one({"group_id": target_id}) # type: ignore
-                
-                if group:
-                    # Broadcast to all members
-                    for member_id in group.get("members", []):
-                        # FIX: I skip the ORIGINAL AUTHOR, not the uploading node!
-                        if member_id != claimed_sender:
-                            if member_id in manager.active_connections:
-                                await manager.send_personal_message(data, member_id)
-                            else:
-                                await send_offline_notification(
-                                    target_id=member_id, 
-                                    sender_username=claimed_username, 
-                                    thread_id=target_id, 
-                                    encrypted_data=data.get("encrypted_payload", {}).get("data", "")
-                                )
-                else:
-                    # 1-on-1 offline
-                    # FIX: I prevent 1-on-1 self-notification loops
-                    if target_id != claimed_sender:
-                        await send_offline_notification(
-                            target_id=target_id, 
-                            sender_username=claimed_username, 
-                            thread_id=claimed_sender, 
-                            encrypted_data=data.get("encrypted_payload", {}).get("data", "")
-                        )
+                # It's a 1-on-1 Direct Message
+                if target_id in manager.active_connections:
+                    await manager.send_personal_message(data, target_id)
+                elif target_id != claimed_sender:
+                    await send_offline_notification(
+                        target_id=target_id, 
+                        sender_username=claimed_username, 
+                        thread_id=claimed_sender, 
+                        encrypted_data=data.get("encrypted_payload", {}).get("data", "")
+                    )
 
-    # 4. Catch ALL exceptions so disconnect ALWAYS runs!
     except Exception as e:
         print(f"WebSocket Disconnected for user {user_id}: {e}")
     finally:
-        # Guarantee they are marked offline when the connection breaks
         await manager.disconnect(user_id) #type: ignore
         
 @router.post("/backup", status_code=status.HTTP_200_OK)
 async def backup_messages_batch(
     payloads: List[BackupMessageDto],
-    current_user_id: str = Depends(get_current_user), # FIX: Now expects a string!
+    current_user_id: str = Depends(get_current_user), 
     api_key: str = Depends(verify_api_key)
 ):
     if not payloads:
@@ -189,11 +179,10 @@ async def backup_messages_batch(
 @router.delete("/backup/{thread_id}", status_code=status.HTTP_200_OK)
 async def delete_thread_backups(
     thread_id: str,
-    current_user_id: str = Depends(get_current_user), # FIX: Now expects a string!
+    current_user_id: str = Depends(get_current_user), 
     api_key: str = Depends(verify_api_key)
 ):
     try:
-        # We use current_user_id directly since it is the string returned by get_current_user()
         result = await db_instance.messages.delete_many({ # type: ignore
             "thread_id": thread_id,
             "sender_id": current_user_id 
@@ -217,32 +206,28 @@ async def sync_missed_messages(
     api_key: str = Depends(verify_api_key)
 ):
     try:
-        # 1. Find all groups the user belongs to (so we fetch missed GC messages too)
         user_groups = await db_instance.groups.find({"members": current_user_id}).to_list(length=None) # type: ignore
         group_ids = [g["group_id"] for g in user_groups]
 
-        # 2. Find messages sent to YOU or YOUR GROUPS that you haven't received
         cursor = db_instance.messages.find({ # type: ignore
             "$or": [
                 {"target_id": current_user_id},
                 {"target_id": {"$in": group_ids}}
             ],
             "is_delivered_to_target": {"$ne": True}, 
-            "sender_id": {"$ne": current_user_id} # Don't fetch our own sent messages
+            "sender_id": {"$ne": current_user_id} 
         })
         missed_messages = await cursor.to_list(length=None)
 
         if not missed_messages:
             return {"status": "success", "messages": []}
 
-        # 3. Mark them as delivered so we don't fetch them again next time!
         msg_ids = [m["message_id"] for m in missed_messages]
         await db_instance.messages.update_many( # type: ignore
             {"message_id": {"$in": msg_ids}},
             {"$set": {"is_delivered_to_target": True}}
         )
 
-        # 4. Clean up MongoDB internal '_id' before returning JSON
         for m in missed_messages:
             if "_id" in m:
                 del m["_id"]
