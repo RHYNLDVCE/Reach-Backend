@@ -10,11 +10,19 @@ router = APIRouter()
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register_user(user_data: UserCreate, api_key: str = Depends(verify_api_key)):
+    # 1. Check if username exists
     existing_user = await db_instance.users.find_one({"username": user_data.username}) # type: ignore
     if existing_user:
         raise HTTPException(status_code=400, detail="Username already registered")
 
-    # FIX: Use the frontend's UUID if they provided one, otherwise generate a new one
+    # 2. SECURITY FIX: Prevent ID Collision / Account Takeover
+    # Check if the provided user_id is already taken by someone else!
+    if user_data.user_id:
+        existing_id = await db_instance.users.find_one({"user_id": user_data.user_id}) # type: ignore
+        if existing_id:
+            raise HTTPException(status_code=400, detail="User ID collision. Please generate a new account.")
+
+    # 3. Use the frontend's UUID if they provided one, otherwise generate a new one
     user_id = user_data.user_id if user_data.user_id else str(uuid.uuid4())
     
     hashed_pwd = get_password_hash(user_data.password)
@@ -27,7 +35,7 @@ async def register_user(user_data: UserCreate, api_key: str = Depends(verify_api
     )
     
     new_user = UserInDB(
-        user_id=user_id, # <-- Now using the preserved ID
+        user_id=user_id, # <-- Now using the preserved ID securely
         username=user_data.username,
         hashed_password=hashed_pwd,
         devices=[initial_device],

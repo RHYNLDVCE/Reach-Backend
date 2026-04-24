@@ -42,6 +42,12 @@ async def sync_mesh_messages(
 ):
     if not messages:
         return {"message": "Empty queue", "synced_count": 0}
+    
+    # AUTHORIZATION FIX: Ensure users can only sync their own messages
+    for msg in messages:
+        if msg.sender_id != current_user:
+            raise HTTPException(status_code=403, detail="Not authorized to sync messages for other users")
+            
     operations = [UpdateOne({"message_id": msg.message_id}, {"$set": msg.model_dump()}, upsert=True) for msg in messages] #type: ignore
 
     try:
@@ -79,11 +85,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 await manager.send_personal_message(data, original_sender)
                 continue
             
-            claimed_sender = data.get("sender_id", user_id)
-            claimed_username = data.get("sender_username", current_username)
-            
-            data["sender_id"] = claimed_sender
-            data["sender_username"] = claimed_username
+            # AUTHORIZATION FIX: Never trust the client payload for identity.
+            # Force the sender to be the authenticated token owner.
+            data["sender_id"] = user_id
+            data["sender_username"] = current_username
             
             if "is_delivered_to_target" not in data:
                 data["is_delivered_to_target"] = False
@@ -100,21 +105,25 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 await manager.send_personal_message(data, user_id)
 
             # --- 4. Route to Target (1-on-1 OR Group Chat) ---
-            # FIX: Check if the target is a group first!
             group = await db_instance.groups.find_one({"group_id": target_id}) # type: ignore
             
             if group:
+                # --- SECURITY FIX: AUTHORIZATION CHECK ---
+                if user_id not in group.get("members", []):
+                    # The sender is not in this group! Ignore or log the intrusion attempt.
+                    logger.warning(f"Intrusion attempt: User {user_id} tried to message group {target_id}")
+                    continue 
+                # -----------------------------------------
+
                 # It's a Group Chat! Fan-out to all members.
                 for member_id in group.get("members", []):
-                    if member_id != claimed_sender:
+                    if member_id != user_id:
                         if member_id in manager.active_connections:
-                            # User is online, send via WebSocket
                             await manager.send_personal_message(data, member_id)
                         else:
-                            # User is offline, send via Firebase Push
                             await send_offline_notification(
                                 target_id=member_id, 
-                                sender_username=claimed_username, 
+                                sender_username=current_username, 
                                 thread_id=target_id, 
                                 encrypted_data=data.get("encrypted_payload", {}).get("data", "")
                             )
@@ -122,11 +131,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 # It's a 1-on-1 Direct Message
                 if target_id in manager.active_connections:
                     await manager.send_personal_message(data, target_id)
-                elif target_id != claimed_sender:
+                elif target_id != user_id:
                     await send_offline_notification(
                         target_id=target_id, 
-                        sender_username=claimed_username, 
-                        thread_id=claimed_sender, 
+                        sender_username=current_username, 
+                        thread_id=user_id, 
                         encrypted_data=data.get("encrypted_payload", {}).get("data", "")
                     )
 
@@ -148,6 +157,11 @@ async def backup_messages_batch(
     try:
         bulk_operations = []
         for dto in payloads:
+            
+            # AUTHORIZATION FIX: Check if the message belongs to the uploader
+            if dto.sender_id != current_user_id and dto.thread_id != current_user_id:
+               raise HTTPException(status_code=403, detail="Not authorized to backup these messages")
+               
             doc = dto.model_dump()
             doc["_id"] = doc.pop("message_id") 
 
@@ -169,6 +183,8 @@ async def backup_messages_batch(
             "modified_count": result.modified_count
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to process MongoDB backup batch: {str(e)}")
         raise HTTPException(
