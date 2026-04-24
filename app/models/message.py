@@ -6,7 +6,10 @@ class SecureCloudMessage(BaseModel):
     message_id: str
     sender_id: str
     target_id: str
-    encrypted_payload: dict[str, str]
+    # --- THE DOUBLE PADLOCK ---
+    target_payload: str  # Encrypted with Target's Public Key (or Group AES Key)
+    self_payload: str    # Encrypted with Sender's Public Key (For device syncing)
+    # --------------------------
     digital_signature: str
     timestamp: int = Field(default_factory=lambda: int(time.time() * 1000))
     hops_taken: int = 0
@@ -16,8 +19,17 @@ class MessageResponse(BaseModel):
     message_id: str
     sender_id: str
     target_id: str
-    encrypted_payload: dict[str, str]
+    target_payload: str
+    self_payload: str
     digital_signature: str
+    timestamp: int
+    
+class BackupMessageDto(BaseModel):
+    message_id: str
+    thread_id: str
+    sender_id: str
+    target_payload: str
+    self_payload: str
     timestamp: int
     
 class MediaMetadata(BaseModel):
@@ -40,10 +52,3 @@ class GroupResponse(BaseModel):
     members: List[str]     # List of user UUIDs in this GC
     created_by: str        # The UUID of the admin who made the GC
     created_at: float
-    
-class BackupMessageDto(BaseModel):
-    message_id: str
-    thread_id: str
-    sender_id: str
-    encrypted_data: str
-    timestamp: int
