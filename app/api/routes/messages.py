@@ -133,7 +133,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
     except Exception as e:
         print(f"WebSocket Disconnected for user {user_id}: {e}")
     finally:
-        await manager.disconnect(user_id) #type: ignore
+        # Pass the specific websocket so the manager knows WHICH device disconnected
+        await manager.disconnect(user_id, websocket) #type: ignore
         
 @router.post("/backup", status_code=status.HTTP_200_OK)
 async def backup_messages_batch(
