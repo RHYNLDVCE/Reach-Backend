@@ -238,3 +238,48 @@ async def sync_missed_messages(
     except Exception as e:
         logger.error(f"Inbox sync failed: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to sync inbox")
+    
+    
+@router.get("/restore-history", status_code=status.HTTP_200_OK)
+async def restore_message_history(
+    current_user_id: str = Depends(get_current_user),
+    api_key: str = Depends(verify_api_key)
+):
+    try:
+        # 1. Fetch all groups the user is a member of
+        user_groups = await db_instance.groups.find({"members": current_user_id}).to_list(length=None)  # type: ignore
+        group_ids = [g["group_id"] for g in user_groups]
+
+        # 2. Find every message where the user is involved (sender, target, or in the group)
+        cursor = db_instance.messages.find({    # type: ignore
+            "$or": [
+                {"sender_id": current_user_id},
+                {"target_id": current_user_id},
+                {"thread_id": current_user_id},
+                {"target_id": {"$in": group_ids}},
+                {"thread_id": {"$in": group_ids}}
+            ]
+        }).sort("timestamp", 1)  # Sort chronologically
+
+        history = await cursor.to_list(length=None)
+
+        # 3. Format the data to match what the Android app expects
+        formatted_messages = []
+        for msg in history:
+            formatted_messages.append({
+                "message_id": msg.get("message_id") or str(msg.get("_id", "")),
+                "thread_id": msg.get("thread_id") or msg.get("target_id", ""),
+                "sender_id": msg.get("sender_id", ""),
+                "target_id": msg.get("target_id", msg.get("thread_id", "")),
+                "sender_username": msg.get("sender_username", "Unknown"),
+                "target_payload": msg.get("target_payload", ""),
+                "self_payload": msg.get("self_payload", ""),
+                "timestamp": msg.get("timestamp", 0)
+            })
+
+        logger.info(f"User {current_user_id} restored {len(formatted_messages)} historical messages.")
+        return {"status": "success", "messages": formatted_messages}
+
+    except Exception as e:
+        logger.error(f"History restore failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to restore message history")
